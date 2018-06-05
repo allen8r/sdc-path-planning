@@ -164,6 +164,18 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 
 }
 
+vector<double> shift_reference(double x, double y, double ref_x, double ref_y, double ref_yaw) {
+	// Shift car reference angle to 0 degrees
+	double shift_x = x - ref_x;
+	double shift_y = y - ref_y;
+
+	shift_x = (shift_x * cos(0 - ref_yaw) - shift_y * sin(0 - ref_yaw));
+	shift_y = (shift_x * sin(0 - ref_yaw) + shift_y * cos(0 - ref_yaw));
+
+	return {shift_x, shift_y};
+}
+
+
 /**
  * Returns a spline s. A vector of doubles for ref_x, ref_y, and ref_yaw is passed back to the &ref_states parameter
  * 
@@ -174,6 +186,8 @@ tk::spline get_trajectory_spline(const double car_x, const double car_y, const d
 																 const vector<double> &map_waypoints_x, const vector<double> &map_waypoints_y,
 																 const double S_BFFR, const double LN_WTH, const double LN_HLF,
 																 const double car_s, const int &lane, vector<double> &ref_states) {
+	
+	cout << "get_trajectory_spline()..." << endl;
 	vector<double> ptsx;
 	vector<double> ptsy;
 
@@ -254,15 +268,20 @@ tk::spline get_trajectory_spline(const double car_x, const double car_y, const d
 	
 }
 
-
-vector<vector<double>> gen_tragectory(const int &lane, const double car_x, const double car_y, 
+/**
+ * Returns a trajectory of points. The trajectory is stored in a vector of vector of doubles. The first
+ * vector of doubles are the x-values of the trajectory points, while the second vector of doubles is the
+ * vector of y-values of the trajectory points.
+ * 
+ */
+vector<vector<double>> gen_trajectory(const int &lane, const double car_x, const double car_y, 
 																			const double car_yaw, const double car_s, vector<double> previous_path_x,
 																			vector<double> previous_path_y, const int prev_size, double &ref_vel,
 																			const vector<double> &map_waypoints_s, const vector<double> &map_waypoints_x,
   																		const vector<double> &map_waypoints_y, const double S_BFFR,
-																			const double LN_WTH, const double LN_HLF) {
+																			const double LN_WTH, const double LN_HLF, const double TIME_SLC) {
 	// Smooth out the trajectory curve
-	
+	cout << "gen_trajectory(): lane: " << lane << endl;
 	vector<double> ref_states;
 
 	tk::spline s = get_trajectory_spline(car_x, car_y, car_yaw, prev_size, previous_path_x,
@@ -293,7 +312,7 @@ vector<vector<double>> gen_tragectory(const int &lane, const double car_x, const
 	// Fill up the rest of the path planner after filling it with prev points; always output 50 points here
 	for (int i = 0; i <= 50-previous_path_x.size(); i++)
 	{
-		double N = (target_dist / (0.02 * ref_vel/2.24)); // TODO: make magic numbers into constants (2.24 m/s)
+		double N = (target_dist / (TIME_SLC * ref_vel/2.24)); // TODO: make magic numbers into constants (2.24 m/s)
 		double x_point = x_add_on + (target_x / N);
 		double y_point = s(x_point);
 
@@ -320,6 +339,92 @@ vector<vector<double>> gen_tragectory(const int &lane, const double car_x, const
 	return trajectory;
 }
 
+bool safe_to_change_lane(const int target_lane, const vector<vector<double>> sensor_fusion,
+													const double LN_WTH, const double prev_size,
+													const double TIME_SLC, const double car_s, const double LC_BFFR) {
+	bool safe_to_go = true;
+
+	for (int j = 0; j < sensor_fusion.size(); j++)
+	{
+		float d_pos = sensor_fusion[j][6];
+		
+		if ((LN_WTH*target_lane) < d_pos && d_pos < (LN_WTH*(target_lane + 1)))
+		{
+			double vx = sensor_fusion[j][3];
+			double vy = sensor_fusion[j][4];
+			double check_speed = sqrt((vx * vx) + (vy * vy)); // find the magnitude of the velocity
+			double check_car_s = sensor_fusion[j][5];
+
+			// *Using prev points, project s value outward in time; look into future*
+			check_car_s += ((double)prev_size * TIME_SLC * check_speed);
+			
+			/*
+			cout << "---------------------------------------" << endl;
+			cout << "                 d_pos: " << d_pos << endl;
+			cout << "                 car_s: " << car_s << endl;
+			cout << "           check_car_s: " << check_car_s << endl;
+			cout << " (check_car_s - car_s): " << (check_car_s - car_s) << endl;
+			cout << " (car_s - check_car_s): " << (car_s - check_car_s) << endl;
+			cout << "---------------------------------------" << endl;
+			*/
+
+			if (((check_car_s > car_s) && ((check_car_s - car_s) < LC_BFFR)) ||
+				((check_car_s < car_s) && ((car_s - check_car_s) < LC_BFFR)))
+			{
+				cout << "Car in the way..." << endl;
+				safe_to_go = false;
+			}
+		}
+	}
+	return safe_to_go;
+}
+
+int change_lane(const int lane, const vector<vector<double>> sensor_fusion,
+								const double LN_WTH, const int prev_size, const double TIME_SLC,
+								const double car_s, const double LC_BFFR, const int LN_CTR,
+								const int LN_LFT, const int LN_RGT) {
+	
+	int new_lane = lane;
+  int target_lane;
+	
+	if (lane == LN_CTR)
+	{
+		// Check left lane
+		if (safe_to_change_lane(lane-1, sensor_fusion, LN_WTH,
+														prev_size, TIME_SLC, car_s, LC_BFFR))
+		{
+			new_lane = lane - 1;
+		}
+		// Check right lane
+		else if (safe_to_change_lane(lane+1, sensor_fusion, LN_WTH,
+														prev_size, TIME_SLC, car_s, LC_BFFR))
+		{
+			new_lane = lane + 1;
+		}
+
+	}
+	else if (lane == LN_RGT)
+	{
+		// change one lane over to LEFT
+		if (safe_to_change_lane(lane-1, sensor_fusion, LN_WTH,
+														prev_size, TIME_SLC, car_s, LC_BFFR))
+		{
+			new_lane = lane - 1;
+		}
+	}
+	else if (lane == LN_LFT)
+	{
+		// change one lane over to RIGHT
+		if (safe_to_change_lane(lane+1, sensor_fusion, LN_WTH,
+														prev_size, TIME_SLC, car_s, LC_BFFR))
+		{
+			new_lane = lane + 1;		
+		}
+	}
+
+  cout << "Change lane to: " << new_lane << endl;
+	return new_lane;
+}
 
 
 int main() {
@@ -360,7 +465,6 @@ int main() {
   }
 
 	double ref_vel = 0.0; // start at zero
-	
 	int lane = 1; // middle lane
 
   h.onMessage([&ref_vel, &lane, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
@@ -381,8 +485,13 @@ int main() {
 		const double LN_HLF = LN_WTH / 2;
 		
 		const double VEL_MAX = 49.5;
-		const double S_BFFR = 35.0; // 30m
-		const double ACC_INC = 0.224;
+		const double S_BFFR = 30.0; // 30 m
+		//const double ACC_INC = 0.224; // acceleration increment, ~0.5 mph
+		//const double ACC_INC = 0.447; // acceleration increment, ~1.0 mph
+		const double ACC_INC = 0.5588; // acceleration increment, ~1.25 mph
+		//const double ACC_INC = 0.67056; // acceleration increment, ~1.5 mph
+		const double TIME_SLC = 0.02; // time slice in seconds (200 ms)
+		const double LC_BFFR = 6.5; // 10 m
 
 
     if (length && length > 2 && data[0] == '4' && data[1] == '2') {
@@ -415,38 +524,25 @@ int main() {
           	// Sensor Fusion Data, a list of all other cars on the same side of the road.
           	auto sensor_fusion = j[1]["sensor_fusion"];
 
+						/*
+						for (int i = 0; i < sensor_fusion.size(); i++) {
+								cout << "=====" << endl;
+								cout << "id: " << sensor_fusion[i][0] << endl;
+								cout << " x: " << sensor_fusion[i][1] << endl;
+								cout << " y: " << sensor_fusion[i][2] << endl;
+								cout << "vx: " << sensor_fusion[i][3] << endl;
+								cout << "vy: " << sensor_fusion[i][4] << endl;
+								cout << " s: " << sensor_fusion[i][5] << endl;
+								cout << " d: " << sensor_fusion[i][6] << endl;
+						}
+						*/
+
           	json msgJson;
 						int prev_size = previous_path_x.size();
 						
 						
 
           	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
-						
-						// Iter 1. Just get the car going in a straight line
-						/* vector<double> next_x_vals;
-          	vector<double> next_y_vals;
-						double dist_inc = 0.5;
-						for(int i = 0; i < 50; i++)
-						{
-							next_x_vals.push_back(car_x+(dist_inc*i)*cos(deg2rad(car_yaw)));
-							next_y_vals.push_back(car_y+(dist_inc*i)*sin(deg2rad(car_yaw)));
-						} */
-
-
-						// Iter 2. Stay in a lane
-						/* vector<double> next_x_vals;
-          	vector<double> next_y_vals;
-						double dist_inc = 0.3;
-						
-						for(int i = 0; i < 50; i++)
-						{
-							double next_s = car_s + (i+1)*dist_inc;
-							double next_d = lane * LN_WTH + LN_HLF;
-							vector<double> xy = getXY(next_s, next_d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
-
-							next_x_vals.push_back(xy[0]);
-							next_y_vals.push_back(xy[1]);
-						} */
 
 
 						// Handle sensor fusion (other cars' data)
@@ -461,7 +557,8 @@ int main() {
 						for (int i= 0; i < sensor_fusion.size(); i++)
 						{
 							float d = sensor_fusion[i][6]; // d value tells which lane a car is in
-							if (d < (LN_HLF + LN_WTH*lane + LN_HLF) && d > (LN_HLF + LN_WTH*lane - LN_HLF))
+							//if (d > (LN_HLF + LN_WTH*lane - LN_HLF) && d < (LN_HLF + LN_WTH*lane + LN_HLF))
+							if (d > (LN_WTH*lane) && d < (LN_WTH*(lane + 1)))
 							{
 								double vx = sensor_fusion[i][3];
 								double vy = sensor_fusion[i][4];
@@ -469,7 +566,7 @@ int main() {
 								double check_car_s = sensor_fusion[i][5];
 
 								// *Using prev points, project s value outward in time; look into future*
-								check_car_s += ((double)prev_size * 0.02 * check_speed); 
+								check_car_s += ((double)prev_size * TIME_SLC * check_speed); 
 
 								// Check s values greater than ego car's and other car's s gap
 								if ((check_car_s > car_s) && ((check_car_s - car_s) < S_BFFR)) // closer than 30m
@@ -479,27 +576,9 @@ int main() {
 									// flag to change lane.
 									//ref_vel = 29.5; // mph
 									too_close = true;
-
-									bool safe_to_change_lane = false;
-									if (safe_to_change_lane)
-									{
-										if (lane == LN_CTR)
-										{
-											// TODO: decide to go LEFT or RIGHT
-												lane++;
-										}
-										else if (lane == LN_RGT)
-										{
-											// change one lane over to LEFT
-												lane--;
-										}
-										else if (lane == LN_LFT)
-										{
-											// change one lane over to RIGHT
-												lane++;
-										}
-									}
 									
+									lane = change_lane(lane, sensor_fusion, LN_WTH, prev_size, TIME_SLC,
+																			car_s, LC_BFFR, LN_CTR, LN_LFT, LN_RGT);
 								}
 
 							}
@@ -516,8 +595,8 @@ int main() {
 							ref_vel += ACC_INC;
 						}
 
-						/* TODO: remove block
-						// Smooth out the trajectory curve
+						// BEGIN generating trajectory ============================================================
+
 						vector<double> ptsx;
 						vector<double> ptsy;
 
@@ -557,7 +636,6 @@ int main() {
 
 							ptsy.push_back(ref_y_prev);
 							ptsy.push_back(ref_y);
-
 						}
 
 						// In Frenet add evenly 30m spaced points ahead of the starting reference
@@ -587,7 +665,7 @@ int main() {
 
 						// Create a spline
 						tk::spline s;
-
+						
 						// Set (x, y) points to the spline
 						s.set_points(ptsx, ptsy);
 
@@ -612,7 +690,7 @@ int main() {
 						// Fill up the rest of the path planner after filling it with prev points; always output 50 points here
 						for (int i = 0; i <= 50-previous_path_x.size(); i++)
 						{
-							double N = (target_dist / (0.02 * ref_vel/2.24)); // TODO: make magic numbers into constants (2.24 m/s)
+							double N = (target_dist / (TIME_SLC * ref_vel/2.24)); // TODO: make magic numbers into constants (2.24 m/s)
 							double x_point = x_add_on + (target_x / N);
 							double y_point = s(x_point);
 
@@ -631,14 +709,10 @@ int main() {
 							next_x_vals.push_back(x_point);
 							next_y_vals.push_back(y_point);
 						}
-						*/
-						vector<vector<double>> trajectory = gen_tragectory(lane, car_x, car_y, car_yaw, car_s, 
-																									previous_path_x, previous_path_y, prev_size,
-																									ref_vel, map_waypoints_s, map_waypoints_x,
-																									map_waypoints_y, S_BFFR, LN_WTH, LN_HLF);
-						
-          	msgJson["next_x"] = trajectory[0];
-          	msgJson["next_y"] = trajectory[1];
+						// END generating trajectory ==============================================================
+
+          	msgJson["next_x"] = next_x_vals;
+          	msgJson["next_y"] = next_y_vals;
 
           	auto msg = "42[\"control\","+ msgJson.dump()+"]";
 
