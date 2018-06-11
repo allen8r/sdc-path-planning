@@ -185,6 +185,9 @@ double get_speed(vector<double> measurement) {
 	return sqrt((vx*vx) + (vy*vy));
 }
 
+/**
+ * Determines whether the car is in the provided target_lane.
+ */
 bool car_in_lane(const int target_lane, const double LN_WTH, const float d) {
 	return (LN_WTH*target_lane) < d && d < (LN_WTH*(target_lane + 1));
 }
@@ -208,10 +211,11 @@ bool safe_to_change_lane(const int target_lane, const vector<vector<double>> sen
 			// Using prev points, project s value outward in time; look into future
 			check_car_s += ((double)prev_size * TIME_SLC * check_speed);
 
-			if (((check_car_s > car_s) && ((check_car_s - car_s) < LC_BFFR) && (check_speed < car_speed)) ||
-				((check_car_s < car_s) && ((car_s - check_car_s) < LC_BFFR) && (check_speed > car_speed)))
+			if (((check_car_s > car_s) && ((check_car_s - car_s) < LC_BFFR)) ||
+				((check_car_s < car_s) && ((car_s - check_car_s) < 0.85*LC_BFFR)))
 			{
-				cout << "Car in the way in lane " << target_lane << endl;
+				string ln_name = (target_lane == 0) ? "LEFT" : ((target_lane == 1) ? "CNTR" : "RGHT");
+				cout << "** Car in the way in "<< ln_name << " Lane **" << endl;
 				safe_to_go = false;
 			}
 		}
@@ -284,30 +288,36 @@ int change_lane(const int lane, const vector<vector<double>> sensor_fusion,
   int target_lane;
 
 	if (lane == LN_CTR) {
-		
-		double velocity_lft = avg_ln_velocity(LN_LFT, sensor_fusion, LN_WTH);
-		double velocity_rgt = avg_ln_velocity(LN_RGT, sensor_fusion, LN_WTH);
 		int cars_lft = cars_in_pocket(LN_LFT, sensor_fusion, LN_WTH, car_s, S_BFFR, prev_size, TIME_SLC);
 		int cars_rgt = cars_in_pocket(LN_RGT, sensor_fusion, LN_WTH, car_s, S_BFFR, prev_size, TIME_SLC);
 
-		cout << "---------------------------------------" << endl;
-		cout << " velocity_lft: " << velocity_lft << endl;
-		cout << " velocity_rgt: " << velocity_rgt << endl;
-		cout << "     cars_lft: " << cars_lft << endl;
-		cout << "     cars_rgt: " << cars_rgt << endl;
+		cout << "----------------------------------" << endl;
+		cout << "  cars left    |   cars right " <<  endl;
+		cout << "      " << cars_lft <<  "        |       " << cars_rgt << endl;
+		cout << "----------------------------------" << endl;
+		
 		if (cars_lft == 0 && cars_rgt == 0) {
 			target_lane = lane - 1; // favor left
 		} else if (cars_rgt < cars_lft) {
 			target_lane = lane + 1;
 		} else if (cars_lft < cars_rgt) {
 			target_lane = lane - 1;
-		/*} else if (velocity_lft > velocity_rgt) {
-			target_lane = lane - 1;
-		} else if (velocity_rgt >= velocity_lft) {
-			target_lane = lane + 1;*/
-		} else { // else keep lane
-			cout << "keep lane: " << lane << endl;
-			target_lane = lane;
+		} else {
+			int vel_lft = max_ln_velocity(LN_LFT, sensor_fusion, LN_WTH);
+			int vel_rgt = max_ln_velocity(LN_RGT, sensor_fusion, LN_WTH);
+
+			cout << "----------------------------------" << endl;
+			cout << "  speed left   |   speed right " <<  endl;
+			cout << "      " << vel_lft <<  "       |       " << vel_rgt << endl;
+			cout << "----------------------------------" << endl;
+
+			if (vel_lft > vel_rgt) {
+				target_lane = lane - 1;
+			} else if (vel_rgt > vel_lft) {
+				target_lane = lane + 1;
+			} else {  // else keep lane
+				target_lane = lane;
+			}
 		}
 	} else if (lane == LN_RGT) {
 		// change one lane over to LEFT
@@ -322,7 +332,16 @@ int change_lane(const int lane, const vector<vector<double>> sensor_fusion,
 		new_lane = target_lane;
 	}
 
-  cout << "Change lane to: " << new_lane << endl;
+	string ln_name = (new_lane == LN_LFT) ? "LEFT" : ((new_lane == LN_CTR) ? "CNTR" : "RGHT");
+
+	if (new_lane == lane) {
+		cout << ">> Keep Lane: " << ln_name << endl;
+	} else {
+  	cout << ">> Change to Lane: " << ln_name << endl;
+	}
+	cout << endl;
+	cout << "==== In Lane: " << ln_name << " ======================" << endl;
+
 	return new_lane;
 }
 
@@ -459,7 +478,8 @@ int main() {
 									
 									too_close = true; // flag to handle decelerating car
 									
-									if (car_speed > 0.8*VEL_MAX && (check_car_s - car_s) > 0.8*S_BFFR) {
+									if (car_speed > 0.8*VEL_MAX && (check_car_s - car_s) > 0.8*S_BFFR)
+									{
 										lane = change_lane(lane, sensor_fusion, LN_WTH, prev_size, TIME_SLC,
 																			car_s, car_speed, LC_BFFR, LN_CTR, LN_LFT, LN_RGT, S_BFFR);
 									}
@@ -474,7 +494,7 @@ int main() {
 						// by increments up to max velocity
 						if (too_close)
 						{
-							ref_vel -= ACC_INC;
+							ref_vel -= 0.75*ACC_INC;
 						}
 						else if (ref_vel < VEL_MAX)
 						{
@@ -524,7 +544,7 @@ int main() {
 							ptsy.push_back(ref_y);
 						}
 
-						// In Frenet add evenly 30m spaced points ahead of the starting reference
+						// In Frenet add points, evenly spaced by S_BFFR meters, ahead of the starting reference
 						double s_inc = S_BFFR;
 						vector<double> next_wp0 = getXY(car_s+s_inc*1, (LN_HLF+LN_WTH*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
 						vector<double> next_wp1 = getXY(car_s+s_inc*2, (LN_HLF+LN_WTH*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
@@ -574,10 +594,12 @@ int main() {
 						double x_add_on = 0;
 
 						// Fill up the rest of the path planner after filling it with prev points; always output 50 points here
+						double N = (target_dist / (TIME_SLC * ref_vel/2.24)); // TODO: make magic numbers into constants (2.24 m/s)
+						double x_increment = target_x / N;
+						
 						for (int i = 0; i <= 50-previous_path_x.size(); i++)
 						{
-							double N = (target_dist / (TIME_SLC * ref_vel/2.24)); // TODO: make magic numbers into constants (2.24 m/s)
-							double x_point = x_add_on + (target_x / N);
+							double x_point = x_add_on + x_increment;
 							double y_point = s(x_point);
 
 							x_add_on = x_point;
