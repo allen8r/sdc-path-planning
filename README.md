@@ -90,5 +90,5 @@ A really helpful resource for doing this project and creating smooth trajectorie
     ```
 ---
 
-See [model_documentation.md]() for the write-up on how to generate paths.
+See [model_documentation.md](https://github.com/allen8r/sdc-path-planning/blob/master/model_documentation.md) for the write-up on how to generate paths.
 
